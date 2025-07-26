@@ -6,11 +6,13 @@ app = FastAPI()
 
 class ChatRequest(BaseModel):
     message: str
+    temperature: float = 0.7  # new field
 
 @app.post("/chat")
 def chat_endpoint(req: ChatRequest):
-    responses = run_orchestration(req.message)
+    responses = run_orchestration(req.message, req.temperature)
     return {"responses": responses, "history": conversation_history}
+
 
 @app.get("/history")
 def get_history():

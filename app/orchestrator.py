@@ -26,23 +26,22 @@ def build_context(agent_name: str) -> str:
         history_text += f"{prefix} {msg['content']}\n"
     return f"{role_instruction}\n\nConversation so far:\n{history_text}\n\nYour response:"
 
-def call_claude(prompt: str):
+def call_claude(prompt: str, temperature: float):
     response = client.messages.create(
         model="claude-3-haiku-20240307",
         max_tokens=400,
-        temperature=0.7,
+        temperature=temperature,
         messages=[{"role": "user", "content": prompt}]
     )
     return response.content[0].text.strip()
 
-def run_orchestration(user_message: str):
-    # Save user input
+def run_orchestration(user_message: str, temperature: float = 0.7):
     conversation_history.append({"role": "user", "agent": "user", "content": user_message})
-
     results = []
     for agent in AGENTS:
         prompt = build_context(agent)
-        reply = call_claude(prompt)
+        reply = call_claude(prompt, temperature)
         conversation_history.append({"role": "agent", "agent": agent, "content": reply})
         results.append({"agent": agent, "reply": reply})
     return results
+
