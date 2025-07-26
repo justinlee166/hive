@@ -1,4 +1,5 @@
 import os
+import random
 from dotenv import load_dotenv
 
 # Load .env file
@@ -44,4 +45,42 @@ def run_orchestration(user_message: str, temperature: float = 0.7):
         conversation_history.append({"role": "agent", "agent": agent, "content": reply})
         results.append({"agent": agent, "reply": reply})
     return results
+
+async def run_streaming_orchestration(user_message: str, temperature: float = 0.7):
+    """
+    Streaming version that yields each agent response as it's ready with typing indicators
+    """
+    # Add user message to conversation history
+    conversation_history.append({"role": "user", "agent": "user", "content": user_message})
+    
+    # Randomize agent speaking order for this conversation
+    agents_order = AGENTS.copy()
+    random.shuffle(agents_order)
+    
+    # Process each agent in random order and yield their responses with typing indicators
+    for agent in agents_order:
+        # First, yield typing indicator
+        typing_event = {
+            "role": "agent",
+            "agent": agent,
+            "content": None,
+            "status": "typing"
+        }
+        yield typing_event
+        
+        # Generate the actual response
+        prompt = build_context(agent)
+        reply = call_claude(prompt, temperature)
+        
+        # Add to conversation history
+        conversation_history.append({"role": "agent", "agent": agent, "content": reply})
+        
+        # Yield the completed response
+        done_event = {
+            "role": "agent",
+            "agent": agent,
+            "content": reply,
+            "status": "done"
+        }
+        yield done_event
 
