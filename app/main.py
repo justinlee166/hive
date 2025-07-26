@@ -64,6 +64,62 @@ async def chat_stream_endpoint(req: ChatRequest):
         }
     )
 
+async def conduct_autonomous_discussion(websocket: WebSocket, temperature: float, max_rounds: int = 3):
+    """
+    Conduct multi-turn autonomous discussion between agents
+    """
+    for round_num in range(max_rounds):
+        print(f"🔄 Starting autonomous round {round_num + 1}/{max_rounds}")
+        
+        # Randomize agent order for each round
+        agents_order = AGENTS.copy()
+        random.shuffle(agents_order)
+        
+        for agent in agents_order:
+            # Send typing indicator
+            await websocket.send_json({
+                "role": "agent",
+                "agent": agent,
+                "content": None,
+                "status": "typing"
+            })
+            
+            # Generate autonomous response based on updated conversation history
+            try:
+                prompt = build_context(agent)
+                # Add instruction for autonomous discussion
+                autonomous_prompt = f"{prompt}\n\nContinue the discussion with the other agents. Build upon their previous points and add your perspective. Keep your response concise (1-2 sentences) and engaging."
+                
+                reply = call_claude(autonomous_prompt, temperature)
+                
+                # Add to conversation history
+                conversation_history.append({"role": "agent", "agent": agent, "content": reply})
+                
+                # Send completed response
+                await websocket.send_json({
+                    "role": "agent",
+                    "agent": agent,
+                    "content": reply,
+                    "status": "done"
+                })
+                
+            except Exception as e:
+                # Fallback response if Claude API fails
+                reply = f"I'm {agent}, continuing our discussion... (experiencing technical difficulties)"
+                conversation_history.append({"role": "agent", "agent": agent, "content": reply})
+                await websocket.send_json({
+                    "role": "agent",
+                    "agent": agent,
+                    "content": reply,
+                    "status": "done"
+                })
+            
+            # Shorter delay between autonomous responses for natural flow
+            await asyncio.sleep(1.0)
+        
+        # Pause between rounds
+        await asyncio.sleep(0.5)
+
 @app.websocket("/ws-chat")
 async def websocket_chat(websocket: WebSocket):
     await websocket.accept()
@@ -84,11 +140,14 @@ async def websocket_chat(websocket: WebSocket):
                 "content": user_msg
             })
             
-            # Randomize agent order for this conversation
+            # === INITIAL ROUND: Each agent responds once ===
+            print("🚀 Starting initial agent responses...")
+            
+            # Randomize agent order for initial responses
             agents_order = AGENTS.copy()
             random.shuffle(agents_order)
             
-            # Process each agent in random order
+            # Process each agent's initial response
             for agent in agents_order:
                 # Send typing indicator
                 await websocket.send_json({
@@ -98,7 +157,7 @@ async def websocket_chat(websocket: WebSocket):
                     "status": "typing"
                 })
                 
-                # Generate reply using existing orchestrator logic
+                # Generate initial response
                 try:
                     prompt = build_context(agent)
                     reply = call_claude(prompt, temperature)
@@ -117,6 +176,7 @@ async def websocket_chat(websocket: WebSocket):
                 except Exception as e:
                     # Fallback response if Claude API fails
                     reply = f"I'm {agent}, and I'm experiencing some technical difficulties. Please try again!"
+                    conversation_history.append({"role": "agent", "agent": agent, "content": reply})
                     await websocket.send_json({
                         "role": "agent",
                         "agent": agent,
@@ -126,8 +186,25 @@ async def websocket_chat(websocket: WebSocket):
                 
                 # Wait before next agent
                 await asyncio.sleep(1.5)
+            
+            # === AUTONOMOUS DISCUSSION ROUNDS ===
+            print("🤖 Starting autonomous discussion rounds...")
+            await asyncio.sleep(1.0)  # Brief pause before autonomous discussion
+            
+            # Conduct multiple rounds of autonomous discussion
+            await conduct_autonomous_discussion(websocket, temperature, max_rounds=3)
+            
+            # === PAUSE FOR USER INPUT ===
+            print("⏸️ Autonomous discussion complete, awaiting user input...")
+            
+            # Send awaiting user status
+            await websocket.send_json({
+                "status": "awaiting_user",
+                "message": "The agents have paused their discussion and are waiting for your input..."
+            })
                 
     except WebSocketDisconnect:
+        print("👋 WebSocket client disconnected")
         pass
 
 @app.get("/history")
