@@ -1,16 +1,27 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from fastapi.middleware.cors import CORSMiddleware
 import json
 import time
 import asyncio
-from .orchestrator import run_orchestration, run_streaming_orchestration, conversation_history
+import random
+from .orchestrator import run_orchestration, run_streaming_orchestration, conversation_history, AGENTS, build_context, call_claude
 
 app = FastAPI()
 
+# Add CORS middleware for React frontend
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],  # Vite default ports
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 class ChatRequest(BaseModel):
     message: str
-    temperature: float = 0.7  # new field
+    temperature: float = 0.7
 
 @app.post("/chat")
 def chat_endpoint(req: ChatRequest):
@@ -52,6 +63,72 @@ async def chat_stream_endpoint(req: ChatRequest):
             "Content-Type": "text/event-stream"
         }
     )
+
+@app.websocket("/ws-chat")
+async def websocket_chat(websocket: WebSocket):
+    await websocket.accept()
+    try:
+        while True:
+            # Receive the user's message
+            data = await websocket.receive_json()
+            user_msg = data["message"]
+            temperature = data.get("temperature", 0.7)
+            
+            # Add user message to conversation history
+            conversation_history.append({"role": "user", "agent": "user", "content": user_msg})
+            
+            # Send user message back immediately
+            await websocket.send_json({
+                "role": "user",
+                "agent": "user", 
+                "content": user_msg
+            })
+            
+            # Randomize agent order for this conversation
+            agents_order = AGENTS.copy()
+            random.shuffle(agents_order)
+            
+            # Process each agent in random order
+            for agent in agents_order:
+                # Send typing indicator
+                await websocket.send_json({
+                    "role": "agent",
+                    "agent": agent,
+                    "content": None,
+                    "status": "typing"
+                })
+                
+                # Generate reply using existing orchestrator logic
+                try:
+                    prompt = build_context(agent)
+                    reply = call_claude(prompt, temperature)
+                    
+                    # Add to conversation history
+                    conversation_history.append({"role": "agent", "agent": agent, "content": reply})
+                    
+                    # Send completed response
+                    await websocket.send_json({
+                        "role": "agent",
+                        "agent": agent,
+                        "content": reply,
+                        "status": "done"
+                    })
+                    
+                except Exception as e:
+                    # Fallback response if Claude API fails
+                    reply = f"I'm {agent}, and I'm experiencing some technical difficulties. Please try again!"
+                    await websocket.send_json({
+                        "role": "agent",
+                        "agent": agent,
+                        "content": reply,
+                        "status": "done"
+                    })
+                
+                # Wait before next agent
+                await asyncio.sleep(1.5)
+                
+    except WebSocketDisconnect:
+        pass
 
 @app.get("/history")
 def get_history():
