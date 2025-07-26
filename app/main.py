@@ -6,7 +6,10 @@ import json
 import time
 import asyncio
 import random
-from .orchestrator import run_orchestration, run_streaming_orchestration, conversation_history, AGENTS, build_context, call_claude
+from .orchestrator import (
+    run_orchestration, run_streaming_orchestration, conversation_history, 
+    AGENTS, build_enhanced_context, call_claude_with_personality, check_for_user_input_request
+)
 
 app = FastAPI()
 
@@ -64,18 +67,23 @@ async def chat_stream_endpoint(req: ChatRequest):
         }
     )
 
-async def conduct_autonomous_discussion(websocket: WebSocket, temperature: float, max_rounds: int = 3):
+async def conduct_concise_discussion(websocket: WebSocket, temperature: float, max_rounds: int = 4):
     """
-    Conduct multi-turn autonomous discussion between agents
+    Conduct concise multi-turn autonomous discussion between agents
     """
-    for round_num in range(max_rounds):
-        print(f"🔄 Starting autonomous round {round_num + 1}/{max_rounds}")
+    for round_num in range(1, max_rounds + 1):
+        print(f"🔄 Concise discussion round {round_num}/{max_rounds}")
         
-        # Randomize agent order for each round
+        # Randomize agent order for each round  
         agents_order = AGENTS.copy()
         random.shuffle(agents_order)
         
-        for agent in agents_order:
+        round_requested_user_input = False
+        
+        for agent_idx, agent in enumerate(agents_order):
+            is_final_agent_in_round = agent_idx == len(agents_order) - 1
+            is_final_round = round_num == max_rounds
+            
             # Send typing indicator
             await websocket.send_json({
                 "role": "agent",
@@ -84,13 +92,19 @@ async def conduct_autonomous_discussion(websocket: WebSocket, temperature: float
                 "status": "typing"
             })
             
-            # Generate autonomous response based on updated conversation history
             try:
-                prompt = build_context(agent)
-                # Add instruction for autonomous discussion
-                autonomous_prompt = f"{prompt}\n\nContinue the discussion with the other agents. Build upon their previous points and add your perspective. Keep your response concise (1-2 sentences) and engaging."
+                # Choose conversation phase based on position
+                if is_final_round and is_final_agent_in_round:
+                    conversation_phase = "final_round"
+                else:
+                    conversation_phase = "autonomous_discussion"
                 
-                reply = call_claude(autonomous_prompt, temperature)
+                # Generate concise response with enhanced context
+                prompt = build_enhanced_context(agent, conversation_phase, round_num)
+                # Add specific instruction for conciseness
+                concise_prompt = f"{prompt}\n\nIMPORTANT: Keep your response to 1-2 sentences maximum. Be direct and impactful."
+                
+                reply = call_claude_with_personality(agent, concise_prompt, temperature)
                 
                 # Add to conversation history
                 conversation_history.append({"role": "agent", "agent": agent, "content": reply})
@@ -103,9 +117,16 @@ async def conduct_autonomous_discussion(websocket: WebSocket, temperature: float
                     "status": "done"
                 })
                 
+                # Check if this agent naturally requested user input
+                if check_for_user_input_request(reply):
+                    print(f"🎯 {agent} naturally requested user input")
+                    round_requested_user_input = True
+                    break
+                
             except Exception as e:
-                # Fallback response if Claude API fails
-                reply = f"I'm {agent}, continuing our discussion... (experiencing technical difficulties)"
+                # Fallback response
+                print(f"❌ Error generating response for {agent}: {e}")
+                reply = f"Technical difficulties aside, let's continue this discussion."
                 conversation_history.append({"role": "agent", "agent": agent, "content": reply})
                 await websocket.send_json({
                     "role": "agent",
@@ -114,21 +135,32 @@ async def conduct_autonomous_discussion(websocket: WebSocket, temperature: float
                     "status": "done"
                 })
             
-            # Shorter delay between autonomous responses for natural flow
-            await asyncio.sleep(1.0)
+            # Shorter delay for concise conversation flow
+            await asyncio.sleep(0.6)
         
-        # Pause between rounds
-        await asyncio.sleep(0.5)
+        # If an agent requested user input or we've reached max rounds, stop
+        if round_requested_user_input or round_num == max_rounds:
+            print(f"⏸️ Concise discussion concluded after {round_num} rounds")
+            break
+        
+        # Brief pause between rounds
+        await asyncio.sleep(0.3)
 
 @app.websocket("/ws-chat")
 async def websocket_chat(websocket: WebSocket):
     await websocket.accept()
     try:
         while True:
-            # Receive the user's message
+            # Receive the user's message with optional autonomous_rounds parameter
             data = await websocket.receive_json()
             user_msg = data["message"]
             temperature = data.get("temperature", 0.7)
+            autonomous_rounds = data.get("autonomous_rounds", 4)  # Default to 4 rounds
+            
+            # Validate autonomous_rounds range
+            autonomous_rounds = max(2, min(8, autonomous_rounds))
+            
+            print(f"📝 User message received, will conduct {autonomous_rounds} autonomous rounds")
             
             # Add user message to conversation history
             conversation_history.append({"role": "user", "agent": "user", "content": user_msg})
@@ -141,7 +173,7 @@ async def websocket_chat(websocket: WebSocket):
             })
             
             # === INITIAL ROUND: Each agent responds once ===
-            print("🚀 Starting initial agent responses...")
+            print("🚀 Starting concise initial responses...")
             
             # Randomize agent order for initial responses
             agents_order = AGENTS.copy()
@@ -159,8 +191,12 @@ async def websocket_chat(websocket: WebSocket):
                 
                 # Generate initial response
                 try:
-                    prompt = build_context(agent)
-                    reply = call_claude(prompt, temperature)
+                    from .orchestrator import build_context
+                    prompt = build_context(agent, "initial_response")
+                    # Add conciseness instruction
+                    concise_prompt = f"{prompt}\n\nIMPORTANT: Keep your response to 1-2 sentences maximum. Be direct and focused."
+                    
+                    reply = call_claude_with_personality(agent, concise_prompt, temperature)
                     
                     # Add to conversation history
                     conversation_history.append({"role": "agent", "agent": agent, "content": reply})
@@ -175,7 +211,7 @@ async def websocket_chat(websocket: WebSocket):
                     
                 except Exception as e:
                     # Fallback response if Claude API fails
-                    reply = f"I'm {agent}, and I'm experiencing some technical difficulties. Please try again!"
+                    reply = f"Technical issues aside, let me share my perspective on this."
                     conversation_history.append({"role": "agent", "agent": agent, "content": reply})
                     await websocket.send_json({
                         "role": "agent",
@@ -185,22 +221,22 @@ async def websocket_chat(websocket: WebSocket):
                     })
                 
                 # Wait before next agent
-                await asyncio.sleep(1.5)
+                await asyncio.sleep(1.0)
             
-            # === AUTONOMOUS DISCUSSION ROUNDS ===
-            print("🤖 Starting autonomous discussion rounds...")
-            await asyncio.sleep(1.0)  # Brief pause before autonomous discussion
+            # === CONCISE AUTONOMOUS DISCUSSION ===
+            print(f"🤖 Starting {autonomous_rounds} rounds of concise autonomous discussion...")
+            await asyncio.sleep(0.8)  # Brief pause before autonomous discussion
             
-            # Conduct multiple rounds of autonomous discussion
-            await conduct_autonomous_discussion(websocket, temperature, max_rounds=3)
+            # Conduct concise multi-turn discussion with user-specified rounds
+            await conduct_concise_discussion(websocket, temperature, max_rounds=autonomous_rounds)
             
             # === PAUSE FOR USER INPUT ===
-            print("⏸️ Autonomous discussion complete, awaiting user input...")
+            print("⏸️ Concise discussion complete, awaiting user input...")
             
             # Send awaiting user status
             await websocket.send_json({
                 "status": "awaiting_user",
-                "message": "The agents have paused their discussion and are waiting for your input..."
+                "message": "Your turn! What's your take on this?"
             })
                 
     except WebSocketDisconnect:
